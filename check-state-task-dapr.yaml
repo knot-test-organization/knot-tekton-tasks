@@ -1,0 +1,95 @@
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: check-state-task-dapr
+  namespace: tekton-pipelines
+  labels:
+    app.kubernetes.io/version: "0.2"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/categories: Build Tools
+    tekton.dev/tags: build-tool
+    tekton.dev/platforms: "linux/amd64,linux/s390x,linux/ppc64le"
+spec:
+  description: >-
+    This Task can be used to run a Maven build.
+
+  workspaces:
+    - name: source
+      description: The workspace consisting of Maven project.
+    # - name: dapr-data
+    #   description: >-
+    #     The workspace for Dapr state data.
+  params:
+    - name: aggregateTasksStatus
+      type: string
+      description: The state of the execution itself.
+    - name: PIPELINE_NAME
+      type: string
+      description: The state of the execution itself.
+    - name: EXECUTION_NAME
+      type: string
+      description: The state of the execution itself.
+    - name: STATE_KEY
+      type: string
+      description: The key under which to save the state
+      default: "nombre_componente|nombre_pipeline|ejecucion|nombre_step" # This is what is going to be save under a key in cosmosdb
+    - name: STATE_JSON
+      type: string
+      description: The JSON data to save in the state
+      default: >-
+        {
+          "pipelineName": "$(params.PIPELINE_NAME)",
+          "status": "running",
+          "executioName": "$(params.EXECUTION_NAME)",
+          "stepName": "$(params.STEP_NAME)",
+          "start_time": "2023-09-28T10:00:00Z",
+          "end_time": null
+        }
+  steps:
+    - name: update-state
+      image: curlimages/curl:latest
+      script: |
+        formatted_date=$(date "+%Y-%m-%d %H:%M:%S")
+        curl -X GET "http://localhost:3500/v1.0/state/cosmosdbcomponent/$(params.STATE_KEY)" -o previouscomponent.txt
+        cat previouscomponent.txt
+        start_time=$(cat previouscomponent.txt | grep -o '"start_time":"[^"]*' | sed 's/"start_time":"//')
+        curl -X POST -H "Content-Type: application/json" -d '[
+          {
+            "key": "$(params.STATE_KEY)",
+            "value": {
+              "pipelineName": "$(params.PIPELINE_NAME)",
+              "status": "$(params.aggregateTasksStatus)",
+              "executioName": "$(params.EXECUTION_NAME)",
+              "stepName": "core-info",
+              "start_time": "'"$start_time"'",
+              "end_time": "'"$formatted_date"'"
+            }
+          }
+        ]' http://localhost:3500/v1.0/state/cosmosdbcomponent
+    # - name: update-previous-state
+    #   image: curlimages/curl:latest
+    #   script: |
+    #     formatted_date=$(date "+%Y-%m-%d %H:%M:%S")
+    #     if [[ "$(params.PREVIOUS_STEP_NAME)" != "pipeline" ]]; then
+    #       curl -X GET "http://localhost:3500/v1.0/state/cosmosdbcomponent/$(params.STATE_KEY)$(params.PREVIOUS_STEP_NAME)" -o previouscomponent.txt
+    #       cat previouscomponent.txt
+    #       start_time=$(cat previouscomponent.txt | grep -o '"start_time":"[^"]*' | sed 's/"start_time":"//')
+    #       curl -X POST -H "Content-Type: application/json" -d '[
+    #       {
+    #         "key": "$(params.STATE_KEY)$(params.PREVIOUS_STEP_NAME)",
+    #         "value": {
+    #           "pipelineName": "$(params.PIPELINE_NAME)",
+    #           "status": "completed",
+    #           "executioName": "$(params.EXECUTION_NAME)",
+    #           "stepName": "$(params.PREVIOUS_STEP_NAME)",
+    #           "start_time": "'"$start_time"'",
+    #           "end_time": "'"$formatted_date"'"
+    #         }
+    #       }
+    #     ]' http://localhost:3500/v1.0/state/cosmosdbcomponent
+    #     fi
+
+    # - name: save-state
+    #   image: curlimages/curl:latest
+    #   command: ["tail", "-f", "/dev/null"]

@@ -1,0 +1,131 @@
+# Please edit the object below. Lines beginning with a '#' will be ignored,
+# and an empty file will abort the edit. If an error occurs while saving this file will be
+# reopened with the relevant failures.
+#
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  labels:
+    app.kubernetes.io/instance: knot-tekton-tasks
+  name: update-version-pull-request
+  namespace: tekton-pipelines
+spec:
+  params:
+  - name: productOrganization
+    type: string
+    description: Name of the product organization
+    default: ""  
+  - name: productArea
+    type: string
+    description: Name of the product Area
+    default: ""  
+  - name: productID
+    type: string
+    description: ID of the product 
+    default: ""    
+  - description: The path to the yaml file to deploy within the git source
+    name: repoName
+    type: string
+  - default: latest
+    description: Image tag
+    name: imageTag
+    type: string
+  - name: environment
+    type: string
+    description: Environment of deployment   
+  - name: namespace
+    type: string
+    description: Namespace of deployment       
+  steps:
+  - env:
+    - name: REPO_NAME
+      value: $(params.repoName)
+    - name: IMAGE_TAG
+      value: $(params.imageTag)
+    - name: PROD_ORG
+      value: $(params.productOrganization)
+    - name: PROD_AREA
+      value: $(params.productArea)
+    - name: PROD_ID
+      value: $(params.productID)
+    - name: ENVIRONMENT
+      value: $(params.environment)
+    - name: NAMESPACE
+      value: $(params.namespace)      
+    image: alpine
+    name: update-yaml
+    resources: {}
+    script: |
+      #!/bin/sh
+      
+      apk update && apk add curl jq yq git
+
+      echo "${ENVIRONMENT}"
+      echo "${NAMESPACE}"
+      echo ${REPO_NAME}
+      echo ${IMAGE_TAG}
+      echo ${PROD_ORG}
+      echo ${PROD_AREA}
+      echo ${PROD_ID}
+      
+      # Set variables
+      git_username="github-actions[bot]"
+      git_token="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"
+      
+
+      git clone https://$git_username:$git_token@github.com/knot-test-organization/knot-onboarding-resources.git
+      
+      cd knot-onboarding-resources
+      
+      git config --global user.name "github-actions[bot]"
+      git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      # Get the current date and time in DD-MM-YYYY-HH-MM format
+      current_date_time=$(date +%d-%m-%Y-%H-%M)
+
+      # Create a new branch with the date in the name
+      git checkout -b "release-$current_date_time"
+      
+      # Navigate to the directory containing enviroments.
+      cd products/${PROD_ORG}/${PROD_AREA}/${PROD_ID}/${REPO_NAME}/deployment
+     
+      # Create the target environment directory.
+      mkdir -p ${ENVIRONMENT}
+
+      # Copy values.yaml from the 'development' directory to the target environment directory.
+      cp development/values.yaml ${ENVIRONMENT}/values.yaml
+     
+      # Navigate to the target environment directory.
+      cd ${ENVIRONMENT}
+
+      # update values.yaml in the target environment directory.
+      yq eval '.image.tag = env(IMAGE_TAG)' values.yaml -i
+      yq eval '.image.envPath = env(ENVIRONMENT)' values.yaml -i
+      yq eval '.image.nameSpace = env(NAMESPACE)' values.yaml -i
+
+      # Navigate back to the component base directory.
+      cd ../..
+
+      # Update values.yaml.
+      yq eval '(.environments[] | select(.envPath == env(ENVIRONMENT) and .nameSpace == env(NAMESPACE))).version = env(IMAGE_TAG)' values.yaml -i
+      yq eval '(.environments[] | select(.envPath == env(ENVIRONMENT) and .nameSpace == env(NAMESPACE))).enabled = "true"' values.yaml -i
+
+
+      
+      # Commit the changes.
+      git add .
+      git commit -am "Updated version in the value files"
+      
+      # Push the branch to GitHub.
+      git push origin release-$current_date_time
+      
+      sleep 10
+      
+      # Create a pull request using the GitHub API.
+      curl -X POST -H "Accept: application/vnd.github+json" -H "Authorization: Bearer $git_token" \
+      https://api.github.com/repos/knot-test-organization/knot-onboarding-resources/pulls \
+      -d '{
+        "title": "Updated version in the value files",
+        "head": "release-'$current_date_time'",
+        "base": "master"
+      }'

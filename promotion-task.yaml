@@ -1,0 +1,149 @@
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: promotion-task
+  namespace: tekton-pipelines
+spec:
+  params:
+  - name: productOrganization
+    type: string
+    description: Name of the product organization
+    default: ""  
+  - name: productArea
+    type: string
+    description: Name of the product Area
+    default: ""  
+  - name: productID
+    type: string
+    description: ID of the product 
+    default: "" 
+  - description: The source image to pull from Azure Container Registry
+    name: sourceImage
+    type: string
+  - description: The target image to be pushed back to Azure Container Registry
+    name: targetImage
+    type: string
+  - description: The Azure Container Registry hostname
+    name: registry
+    type: string
+  steps:
+  - env:
+    - name: SOURCE_IMAGE
+      value: $(params.sourceImage)
+    - name: TARGET_IMAGE
+      value: $(params.targetImage)
+    image: docker:dind
+    name: image-retag
+    resources: {}
+    script: |
+          #!/bin/sh
+
+          # Start Docker daemon
+          dockerd >/dev/null 2>&1 &
+          sleep 10
+          docker pull "${SOURCE_IMAGE}"
+
+          # Remove 'refs/tags/' from the target image name
+          IMAGE_TARGET_NEW=$(echo "${TARGET_IMAGE}" | sed 's/refs\/tags\///g')
+
+          echo "${IMAGE_TARGET_NEW}"
+
+          docker tag "${SOURCE_IMAGE}" "${IMAGE_TARGET_NEW}"
+
+          docker push "${IMAGE_TARGET_NEW}"
+
+    securityContext:
+      allowPrivilegeEscalation: true
+      capabilities:
+        add:
+        - NET_ADMIN
+      privileged: true
+      runAsUser: 0
+  - env:
+    - name: TARGET_IMAGE
+      value: $(params.targetImage)
+    - name: PROD_ORG
+      value: $(params.productOrganization)
+    - name: PROD_AREA
+      value: $(params.productArea)
+    - name: PROD_ID
+      value: $(params.productID)    
+    image: alpine
+    name: update-image
+    resources: {}
+    script: |
+      #!/bin/sh
+      apk update
+      apk add jq
+      apk add curl
+      apk add yq
+
+      export IMAGE_TAG=$(echo "${TARGET_IMAGE}" | awk -F':' '{print $NF}' | sed 's/refs\/tags\///g')
+      export REPO_NAME=$(echo "${TARGET_IMAGE}" | awk -F'.' '{print $(NF-4)}')
+
+      # Set environment variables
+      if [[ $IMAGE_TAG == *-rc* ]] || [[ $IMAGE_TAG == *-RC* ]]
+      then
+        export ENVIRONMENT=$(echo "stage")
+        export  NAMESPACE=$(echo "pre")
+      else
+        export  ENVIRONMENT=$(echo "development")
+        export  NAMESPACE=$(echo "dev")
+      fi
+      echo "${ENVIRONMENT}"
+      echo "${NAMESPACE}"
+      echo ${REPO_NAME}
+      echo ${IMAGE_TAG}
+      echo ${PROD_ORG}
+      echo ${PROD_AREA}
+      echo ${PROD_ID}
+      
+      
+      echo "curl https://api.github.com/repos/knot-test-organization/knot-onboarding-resources/contents/products/${PROD_ORG}/${PROD_AREA}/${PROD_ID}/${REPO_NAME}/deployment/${ENVIRONMENT}/values.yaml"
+      curl -H "Accept: application/vnd.github+json" -H "Authorization: Bearer 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" -H "X-GitHub-Api-Version: 2022-11-28" https://api.github.com/repos/knot-test-organization/knot-onboarding-resources/contents/products/${PROD_ORG}/${PROD_AREA}/${PROD_ID}/${REPO_NAME}/deployment/development/values.yaml | jq -r '.content' | base64 -d > values.yaml
+   
+      cat values.yaml
+      export sha="$(curl -H "Accept: application/vnd.github+json" -H "Authorization: Bearer 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" -H "X-GitHub-Api-Version: 2022-11-28" https://api.github.com/repos/knot-test-organization/knot-onboarding-resources/contents/products/${PROD_ORG}/${PROD_AREA}/${PROD_ID}/${REPO_NAME}/deployment/${ENVIRONMENT}/values.yaml | jq -r '.sha')"
+      export tag="$(grep tag: values.yaml | awk '{print $2}' | uniq | sed -e 's/%//')"
+      export envPath="$(grep envPath: values.yaml | awk '{print $2}' | uniq | sed -e 's/%//')"
+      export nameSpace="$(grep nameSpace: values.yaml | awk '{print $2}' | uniq | sed -e 's/%//')"
+     
+      sed -i -e "s;tag: $tag;tag: ${IMAGE_TAG};g" values.yaml
+      sed -i -e "s;envPath: $envPath;envPath: ${ENVIRONMENT};g" values.yaml
+      sed -i -e "s;nameSpace: $nameSpace;nameSpace: ${NAMESPACE};g" values.yaml
+
+      cat values.yaml
+      export content="$(cat values.yaml | base64 -w0)"
+      echo "$content"
+      curl -X PUT -H "Accept: application/vnd.github+json" -H "Authorization: Bearer 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" -H "X-GitHub-Api-Version: 2022-11-28" https://api.github.com/repos/knot-test-organization/knot-onboarding-resources/contents/products/${PROD_ORG}/${PROD_AREA}/${PROD_ID}/${REPO_NAME}/deployment/${ENVIRONMENT}/values.yaml -d '{"message":"update version","committer":{"name":"github-actions[bot]","email":"41898282+github-actions[bot]@users.noreply.github.com"},"content":"'"$content"'","sha":"'"$sha"'"}' -v
+
+      echo  "https://raw.githubusercontent.com/knot-test-organization/knot-onboarding-resources/master/products/${PROD_ORG}/${PROD_AREA}/${PROD_ID}/${REPO_NAME}/values.yaml"                                                                                                                                                                                                                             
+      # Download the values.yaml file from GitHub
+      curl -H "Accept: application/vnd.github+json" -H "Authorization: Bearer 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" https://raw.githubusercontent.com/knot-test-organization/knot-onboarding-resources/master/products/${PROD_ORG}/${PROD_AREA}/${PROD_ID}/${REPO_NAME}/values.yaml > values.yaml
+
+      cat values.yaml 
+
+      # Parse and update the YAML file
+      yq eval '(.environments[] | select(.envPath == env(ENVIRONMENT) and .nameSpace == env(NAMESPACE))).version = env(IMAGE_TAG)' values.yaml -i
+      
+      cat values.yaml 
+
+      # Encode the updated YAML content in base64
+      export content="$(cat values.yaml | base64 -w0)"
+      
+      # Get the SHA of the values.yaml file on GitHub
+      export sha="$(curl -H "Accept: application/vnd.github+json" -H "Authorization: Bearer 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" https://api.github.com/repos/knot-test-organization/knot-onboarding-resources/contents/products/${PROD_ORG}/${PROD_AREA}/${PROD_ID}/${REPO_NAME}/values.yaml | jq -r '.sha')"
+
+      # Update the values.yaml file on GitHub
+      curl -X PUT -H "Accept: application/vnd.github+json" -H "Authorization: Bearer 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" https://api.github.com/repos/knot-test-organization/knot-onboarding-resources/contents/products/${PROD_ORG}/${PROD_AREA}/${PROD_ID}/${REPO_NAME}/values.yaml -d '{"message":"Update version","committer":{"name":"github-actions[bot]","email":"41898282+github-actions[bot]@users.noreply.github.com"},"content":"'"$content"'","sha":"'"$sha"'"}' -v
+
+    securityContext:
+      allowPrivilegeEscalation: true
+      capabilities:
+        add:
+        - NET_ADMIN
+      privileged: true
+      runAsUser: 0
+  workspaces:
+  - mountPath: /root/.docker/
+    name: dockerconfig

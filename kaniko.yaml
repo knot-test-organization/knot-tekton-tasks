@@ -1,0 +1,127 @@
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: kaniko
+  namespace: tekton-pipelines
+  labels:
+    app.kubernetes.io/version: "0.6"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.17.0"
+    tekton.dev/categories: Image Build
+    tekton.dev/tags: image-build
+    tekton.dev/displayName: "Build and upload container image using Kaniko"
+    tekton.dev/platforms: "linux/amd64,linux/arm64,linux/ppc64le"
+spec:
+  description: >-
+    This Task builds a simple Dockerfile with kaniko and pushes to a registry.
+    This Task stores the image name and digest as results, allowing Tekton Chains to pick up
+    that an image was built & sign it.
+  params:
+    - name: IMAGE
+      description: Name (reference) of the image to build.
+    - name: DOCKERFILE
+      description: Path to the Dockerfile to build.
+      default: ./Dockerfile
+    - name: CONTEXT
+      description: The build context used by Kaniko.
+      default: ./
+    - name: EXTRA_ARGS
+      type: array
+      default: []
+    - name: BUILDER_IMAGE
+      description: The image on which builds will run (default is v1.5.1)
+      default: gcr.io/kaniko-project/executor:v1.5.1@sha256:c6166717f7fe0b7da44908c986137ecfeab21f31ec3992f6e128fff8a94be8a5
+    - name: task-name
+      description: The task name.
+      type: string
+      default: "task-name"
+    - name: repoName
+      description: The repo name.
+      default: "Repo-name"
+    - name: PIPELINE_NAME
+      description: The pipeline name.
+      default: "Pipeline-name"
+    - name: EXECUTION_NAME
+      description: The execution name.
+      default: "Execution-name"
+  workspaces:
+    - name: source
+      description: Holds the context and Dockerfile
+    - name: dockerconfig
+      description: Includes a docker `config.json`
+      optional: true
+      mountPath: /kaniko/.docker
+  results:
+    - name: IMAGE_DIGEST
+      description: Digest of the image just built.
+    - name: IMAGE_URL
+      description: URL of the image just built.
+  steps:
+    - name: create-state
+      image: curlimages/curl:latest
+      resources:
+        requests:
+          cpu: "65m"      
+          memory: "100Mi"   
+        limits:
+          cpu: "500m"     
+          memory: "200Mi"  
+      script: |
+        formatted_date=$(date "+%Y-%m-%d %H:%M:%S")
+        if [[ "$(params.task-name)|" != "task-name" ]]; then
+        curl -X POST -H "Content-Type: application/json" -d '[
+          {
+            "key": "$(params.repoName)|$(params.PIPELINE_NAME)|$(params.EXECUTION_NAME)|$(params.task-name)",
+            "value": {
+              "pipelineName": "$(params.PIPELINE_NAME)",
+              "status": "running",
+              "executioName": "$(params.EXECUTION_NAME)",
+              "stepName": "$(params.task-name)",
+              "start_time": "'"$formatted_date"'",
+              "end_time": null
+            }
+          }
+        ]' http://localhost:3500/v1.0/state/cosmosdbcomponent
+        fi
+    - name: build-and-push
+      workingDir: $(workspaces.source.path)
+      image: $(params.BUILDER_IMAGE)
+      args:
+        - $(params.EXTRA_ARGS)
+        - --dockerfile=$(params.DOCKERFILE)
+        - --context=$(workspaces.source.path)/$(params.CONTEXT) # The user does not need to care the workspace and the source.
+        - --destination=$(params.IMAGE)
+        - --digest-file=$(results.IMAGE_DIGEST.path)
+      # kaniko assumes it is running as root, which means this example fails on platforms
+      # that default to run containers as random uid (like OpenShift). Adding this securityContext
+      # makes it explicit that it needs to run as root.
+      securityContext:
+        runAsUser: 0
+    - name: write-url
+      image: docker.io/library/bash:5.1.4@sha256:c523c636b722339f41b6a431b44588ab2f762c5de5ec3bd7964420ff982fb1d9
+      script: |
+        set -e
+        image="$(params.IMAGE)"
+        echo -n "${image}" | tee "$(results.IMAGE_URL.path)"
+    - name: update-state
+      image: curlimages/curl:latest
+      script: |
+        formatted_date=$(date "+%Y-%m-%d %H:%M:%S")
+        if [[ "$(params.task-name)|" != "task-name" ]]; then
+          curl -X GET "http://localhost:3500/v1.0/state/cosmosdbcomponent/$(params.repoName)|$(params.PIPELINE_NAME)|$(params.EXECUTION_NAME)|$(params.task-name)" -o previouscomponent.txt
+          cat previouscomponent.txt
+          start_time=$(cat previouscomponent.txt | grep -o '"start_time":"[^"]*' | sed 's/"start_time":"//')
+          curl -X POST -H "Content-Type: application/json" -d '[
+            {
+              "key": "$(params.repoName)|$(params.PIPELINE_NAME)|$(params.EXECUTION_NAME)|$(params.task-name)",
+              "value": {
+                "pipelineName": "$(params.PIPELINE_NAME)",
+                "status": "completed",
+                "executioName": "$(params.EXECUTION_NAME)",
+                "stepName": "$(params.task-name)",
+                "start_time": "'"$start_time"'",
+                "end_time": "'"$formatted_date"'"
+              }
+            }
+          ]' http://localhost:3500/v1.0/state/cosmosdbcomponent
+        fi

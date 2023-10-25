@@ -1,0 +1,25 @@
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  labels:
+    app.kubernetes.io/instance: knot-tekton-tasks
+  name: publish-azure-function
+  namespace: tekton-pipelines
+spec:
+  params:
+    - name: functionName
+      description: Name of the function to deploy
+      type: string
+    - name: funcLanguage
+      description: Function language [azfuncjs, azfuncts, azfuncpy, azfuncdotnet, azfuncjava]
+      type: string
+    - name: environment
+      description: environment where the function will be deployed
+      type: string
+  steps:
+    - name: example
+      image: ubuntu:22.04
+      script: |
+        echo "Function Name: $(params.functionName)"
+        echo "Function Language: $(params.funcLanguage)"
+        echo "Environment: $(params.environment)"

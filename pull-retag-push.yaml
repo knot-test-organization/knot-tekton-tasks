@@ -1,0 +1,117 @@
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: pull-retag-push
+  namespace: tekton-pipelines
+spec:
+  params:
+  - name: IMAGE
+    description: The source image to pull from Azure Container Registry   
+    type: string
+  - name: tag
+    description: The tag of the  image to be pushed back to Azure Container Registry 
+    type: string
+  - name: task-name
+    description: The task name.
+    type: string
+    default: "task-name"
+  - name: repoName
+    description: The repo name.
+    default: "Repo-name"
+  - name: PIPELINE_NAME
+    description: The pipeline name.
+    default: "Pipeline-name"
+  - name: EXECUTION_NAME
+    description: The execution name.
+    default: "Execution-name"
+  results:
+  - name: imageTag
+    description: The precise image tag.  
+  steps:
+    - name: create-state
+      image: curlimages/curl:latest
+      resources:
+        requests:
+          cpu: "100m"      
+          memory: "150Mi"   
+        limits:
+          cpu: "500m"     
+          memory: "200Mi"  
+      script: |
+        formatted_date=$(date "+%Y-%m-%d %H:%M:%S")
+        if [[ "$(params.task-name)|" != "task-name" ]]; then
+        curl -X POST -H "Content-Type: application/json" -d '[
+          {
+            "key": "$(params.repoName)|$(params.PIPELINE_NAME)|$(params.EXECUTION_NAME)|$(params.task-name)",
+            "value": {
+              "pipelineName": "$(params.PIPELINE_NAME)",
+              "status": "running",
+              "executioName": "$(params.EXECUTION_NAME)",
+              "stepName": "$(params.task-name)",
+              "start_time": "'"$formatted_date"'",
+              "end_time": null
+            }
+          }
+        ]' http://localhost:3500/v1.0/state/cosmosdbcomponent
+        fi
+    - name: image-retag
+      image: docker:dind
+      resources: {}
+      env:
+        - name: IMAGE
+          value: $(params.IMAGE)
+        - name: TAG
+          value: $(params.tag)
+      script: |
+            #!/bin/sh
+
+            # Start Docker daemon
+            dockerd >/dev/null 2>&1 &
+            sleep 10
+
+            # Remove 'refs/tags/' from the target image name
+            IMAGE_TAG=$(echo "${TAG}" | sed 's/refs\/tags\///g')
+
+            echo "${IMAGE_TAG}"
+
+            # Try pulling the image with "-RC" prefix. If it fails, try with "-rc" prefix.
+            docker pull "${IMAGE}:${IMAGE_TAG}-RC" || docker pull "${IMAGE}:${IMAGE_TAG}-rc"
+
+            # Tag and push the image with the new tag.
+            docker tag "${IMAGE}:${IMAGE_TAG}-RC" "${IMAGE}:${IMAGE_TAG}" || docker tag "${IMAGE}:${IMAGE_TAG}-rc" "${IMAGE}:${IMAGE_TAG}"
+            docker push "${IMAGE}:${IMAGE_TAG}"
+
+            printf "%s" "${IMAGE_TAG}" > "$(results.imageTag.path)"
+      securityContext:
+        allowPrivilegeEscalation: true
+        capabilities:
+          add:
+          - NET_ADMIN
+        privileged: true
+        runAsUser: 0
+    - name: update-state
+      image: curlimages/curl:latest
+      script: |
+        formatted_date=$(date "+%Y-%m-%d %H:%M:%S")
+        if [[ "$(params.task-name)|" != "task-name" ]]; then
+          curl -X GET "http://localhost:3500/v1.0/state/cosmosdbcomponent/$(params.repoName)|$(params.PIPELINE_NAME)|$(params.EXECUTION_NAME)|$(params.task-name)" -o previouscomponent.txt
+          cat previouscomponent.txt
+          start_time=$(cat previouscomponent.txt | grep -o '"start_time":"[^"]*' | sed 's/"start_time":"//')
+          curl -X POST -H "Content-Type: application/json" -d '[
+            {
+              "key": "$(params.repoName)|$(params.PIPELINE_NAME)|$(params.EXECUTION_NAME)|$(params.task-name)",
+              "value": {
+                "pipelineName": "$(params.PIPELINE_NAME)",
+                "status": "completed",
+                "executioName": "$(params.EXECUTION_NAME)",
+                "stepName": "$(params.task-name)",
+                "start_time": "'"$start_time"'",
+                "end_time": "'"$formatted_date"'"
+              }
+            }
+          ]' http://localhost:3500/v1.0/state/cosmosdbcomponent
+        fi
+  workspaces:
+  - name: dockerconfig
+    mountPath: /root/.docker/
+     
